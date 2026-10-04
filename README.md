@@ -19,11 +19,27 @@ spanlight exists for the cases where your prompts and completions should not lea
 ## Quickstart
 
 ```bash
-pip install -e .
+pip install -e ".[server]"
 python -m spanlight.server   # serves on http://127.0.0.1:4318
 ```
 
-Send a trace:
+Instrument your app (the SDK is stdlib-only; `pip install spanlight` adds zero dependencies):
+
+```python
+from spanlight import Spanlight
+
+sl = Spanlight()  # buffers in-process, flushes in the background
+with sl.trace("chat-request", user="demo") as t:
+    with t.llm_span("answer", model="claude-haiku-4-5") as s:
+        reply = call_model(prompt)
+        s.record_usage(input_tokens=420, output_tokens=180,
+                       input_text=prompt, output_text=reply)
+```
+
+Cost is computed from a bundled list-price table (override with `Spanlight(prices={...})`); unknown models record `None` rather than a guess.
+A span that raises records `status="error"` and re-raises; if the collector is down, traces drop with one warning - the SDK never takes your app down.
+
+Or send a trace by hand:
 
 ```bash
 curl -s -X POST http://127.0.0.1:4318/api/ingest -H 'content-type: application/json' -d '{
@@ -79,7 +95,7 @@ ruff check .
 ## Roadmap
 
 - [x] Server: ingest + traces + model stats + timeseries (tested, CI)
-- [ ] Python SDK: `with trace(...)` / span context managers, cost table, buffered flush
+- [x] Python SDK: trace/span context managers, cost table, buffered background flush
 - [ ] React dashboard: trace list, span waterfall, model stats, cost over time
 - [ ] Demo seeder so the dashboard renders without any LLM keys
 - [ ] OpenTelemetry bridge: mirror spans to any OTLP collector
