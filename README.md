@@ -14,7 +14,7 @@ spanlight exists for the cases where your prompts and completions should not lea
 - **Cost and token accounting**: every LLM span carries input/output tokens and cost; the API aggregates both per trace and per model.
 - **Latency stats**: p50/p95 latency and error rates per model.
 - **Timeseries**: calls, tokens, cost, and errors over time, bucketed for charting.
-- **A local dashboard** (in progress): a React UI over the same read API.
+- **A local dashboard**: stat tiles, calls and spend over time, per-model stats, a trace list, and a span waterfall with payload inspection - light and dark, colorblind-validated palette.
 
 ## Quickstart
 
@@ -84,11 +84,20 @@ flowchart LR
 SQLite is deliberate: a self-hosted, single-team tool should install in seconds and keep its data in one file.
 The server opens one serialized connection (CPython's `sqlite3` is compiled thread-safe) and every ingest batch commits atomically.
 
+## Dashboard
+
+```bash
+cd dashboard && npm install && npm run build   # the server serves dashboard/dist at /
+```
+
+Open http://127.0.0.1:4318/ with the server running.
+For dashboard development, `npm run dev` serves it on :5173 with API calls proxied to :4318.
+
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest          # API tests over a temp database
+pip install -e ".[server,dev]"
+pytest          # API + SDK tests over a temp database
 ruff check .
 ```
 
@@ -96,7 +105,7 @@ ruff check .
 
 - [x] Server: ingest + traces + model stats + timeseries (tested, CI)
 - [x] Python SDK: trace/span context managers, cost table, buffered background flush
-- [ ] React dashboard: trace list, span waterfall, model stats, cost over time
+- [x] React dashboard: stat tiles, calls/spend over time, model stats, trace list, span waterfall
 - [ ] Demo seeder so the dashboard renders without any LLM keys
 - [ ] OpenTelemetry bridge: mirror spans to any OTLP collector
 
