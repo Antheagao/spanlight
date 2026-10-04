@@ -1,0 +1,29 @@
+# Secrets: never commit environment files, anywhere in the tree.
+.env
+.env.*
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Local databases
+*.db
+*.db-wal
+*.db-shm
+
+# Node (dashboard)
+node_modules/
+dashboard/dist/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
