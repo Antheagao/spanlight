@@ -14,29 +14,35 @@ const RANGES = [
 
 type RangeKey = (typeof RANGES)[number]['key']
 
+interface Snapshot {
+  stats: ModelStats[]
+  buckets: Bucket[]
+  traces: TraceSummary[]
+  since: number
+  now: number
+}
+
+const EMPTY: Snapshot = { stats: [], buckets: [], traces: [], since: 0, now: 1 }
+
 export default function App() {
   const [rangeKey, setRangeKey] = useState<RangeKey>('24h')
-  const [stats, setStats] = useState<ModelStats[]>([])
-  const [buckets, setBuckets] = useState<Bucket[]>([])
-  const [traces, setTraces] = useState<TraceSummary[]>([])
+  const [snap, setSnap] = useState<Snapshot>(EMPTY)
   const [detail, setDetail] = useState<TraceDetail | null>(null)
   const [fetchError, setFetchError] = useState<string | null>(null)
-  const [since, setSince] = useState(() => Date.now() / 1000 - 24 * 3600)
 
   const range = RANGES.find((r) => r.key === rangeKey)!
+  const { stats, buckets, traces, since, now } = snap
 
   const refresh = useCallback(async () => {
-    const sinceNow = Date.now() / 1000 - range.seconds
-    setSince(sinceNow)
+    const fetchedAt = Date.now() / 1000
+    const sinceNow = fetchedAt - range.seconds
     try {
       const [s, b, t] = await Promise.all([
         api.modelStats(sinceNow),
         api.timeseries(sinceNow, range.bucket),
         api.traces(),
       ])
-      setStats(s)
-      setBuckets(b)
-      setTraces(t.traces)
+      setSnap({ stats: s, buckets: b, traces: t.traces, since: sinceNow, now: fetchedAt })
       setFetchError(null)
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : String(e))
@@ -44,6 +50,9 @@ export default function App() {
   }, [range])
 
   useEffect(() => {
+    // Fetch-on-mount and polling are exactly the external-system sync an
+    // effect is for; every setState inside refresh happens after an await.
+    // oxlint-disable-next-line react/set-state-in-effect
     refresh()
     const id = setInterval(refresh, 15000)
     return () => clearInterval(id)
@@ -95,7 +104,9 @@ export default function App() {
                 ? seconds(detail.ended_at - detail.started_at)
                 : 'still open'}
             </span>
-            <span>{detail.spans.length} spans</span>
+            <span>
+              {detail.spans.length} {detail.spans.length === 1 ? 'span' : 'spans'}
+            </span>
             <span>
               {usd(detail.spans.reduce((n, s) => n + (s.cost_usd ?? 0), 0))} ·{' '}
               {count(
@@ -159,6 +170,7 @@ export default function App() {
               <TimeBars
                 buckets={buckets}
                 since={since}
+                now={now}
                 bucketSeconds={range.bucket}
                 metric="calls"
               />
@@ -168,6 +180,7 @@ export default function App() {
               <TimeBars
                 buckets={buckets}
                 since={since}
+                now={now}
                 bucketSeconds={range.bucket}
                 metric="cost"
               />

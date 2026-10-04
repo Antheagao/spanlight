@@ -8,6 +8,16 @@ One small server, one dashboard, zero vendor accounts.
 Tools like Langfuse and LangSmith do this well as hosted products.
 spanlight exists for the cases where your prompts and completions should not leave your machine: it is a single `pip install`, backed by SQLite, with no API keys, no sign-up, and no data egress.
 
+![The spanlight dashboard](docs/overview-light.png)
+
+<details>
+<summary>Dark mode and the span waterfall</summary>
+
+![Dark mode](docs/overview-dark.png)
+![Span waterfall for one trace](docs/trace-light.png)
+
+</details>
+
 ## What you get
 
 - **Tracing**: group the work behind one request (LLM calls, retrieval, tool use) into a trace of timed spans.
@@ -20,6 +30,7 @@ spanlight exists for the cases where your prompts and completions should not lea
 
 ```bash
 pip install -e ".[server]"
+python -m spanlight.demo     # optional: seed a week of demo traffic, no keys needed
 python -m spanlight.server   # serves on http://127.0.0.1:4318
 ```
 
@@ -106,7 +117,7 @@ ruff check .
 - [x] Server: ingest + traces + model stats + timeseries (tested, CI)
 - [x] Python SDK: trace/span context managers, cost table, buffered background flush
 - [x] React dashboard: stat tiles, calls/spend over time, model stats, trace list, span waterfall
-- [ ] Demo seeder so the dashboard renders without any LLM keys
+- [x] Demo seeder so the dashboard renders without any LLM keys
 - [ ] OpenTelemetry bridge: mirror spans to any OTLP collector
 
 ## License

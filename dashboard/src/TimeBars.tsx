@@ -1,35 +1,38 @@
 import { useMemo, useRef } from 'react'
 import type { Bucket } from './api'
 import { clock, count, usd } from './format'
-import { Tip, useTip } from './Tip'
+import { Tip } from './Tip'
+import { useTip } from './useTip'
 
 interface Props {
   buckets: Bucket[]
   since: number
+  /** The fetch timestamp, passed in so render stays pure. */
+  now: number
   bucketSeconds: number
   metric: 'calls' | 'cost'
 }
 
 /** Bucketed bars over time. `calls` stacks ok under errors (status color,
  *  legend carries the warning icon + label); `cost` is a single series. */
-export function TimeBars({ buckets, since, bucketSeconds, metric }: Props) {
+export function TimeBars({ buckets, since, now, bucketSeconds, metric }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const { tip, show, hide } = useTip(ref)
 
   const dense = useMemo(() => {
     const byBucket = new Map(buckets.map((b) => [b.bucket, b]))
     const start = Math.floor(since / bucketSeconds) * bucketSeconds
-    const end = Math.floor(Date.now() / 1000 / bucketSeconds) * bucketSeconds
+    const end = Math.floor(now / bucketSeconds) * bucketSeconds
     const cols: Bucket[] = []
     for (let t = start; t <= end; t += bucketSeconds) {
       cols.push(byBucket.get(t) ?? { bucket: t, calls: 0, cost_usd: 0, errors: 0, tokens: 0 })
     }
     return cols
-  }, [buckets, since, bucketSeconds])
+  }, [buckets, since, now, bucketSeconds])
 
   const max = Math.max(1e-9, ...dense.map((b) => (metric === 'calls' ? b.calls : b.cost_usd)))
-  const fmt = metric === 'calls' ? count : usd
-  const range = Date.now() / 1000 - since
+  const fmt = metric === 'calls' ? (v: number) => count(Math.round(v)) : usd
+  const range = now - since
 
   return (
     <div>

@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from 'react'
 import type { Span, TraceDetail } from './api'
 import { count, seconds, usd } from './format'
-import { Tip, useTip } from './Tip'
+import { Tip } from './Tip'
+import { useTip } from './useTip'
 
 const KIND_COLOR: Record<Span['kind'], string> = {
   llm: 'var(--series-1)',
