@@ -145,3 +145,28 @@ def test_validation_rejects_bad_payloads(client):
     bad = span(input_tokens=-1)
     assert client.post("/api/ingest", json={"traces": [], "spans": [bad]}).status_code == 422
     assert client.post("/api/ingest", json={"spans": [{"id": "x"}]}).status_code == 422
+
+
+def test_paging_through_traces_with_equal_started_at_loses_and_repeats_nothing(client):
+    # 23 traces share one timestamp, so page boundaries fall inside the tie.
+    ids = [f"t{i:02d}" for i in range(23)]
+    traces = [trace(id=i, started_at=1000.0) for i in ids]
+    traces += [trace(id="newer", started_at=2000.0), trace(id="older", started_at=500.0)]
+    client.post("/api/ingest", json={"traces": traces, "spans": []})
+
+    seen, params = [], {"limit": 7}
+    while True:
+        page = client.get("/api/traces", params=params).json()
+        seen += [t["id"] for t in page["traces"]]
+        if page["next_before"] is None:
+            break
+        params = {"limit": 7, "before": page["next_before"], "before_id": page["next_before_id"]}
+
+    assert seen == ["newer", *sorted(ids, reverse=True), "older"]
+
+
+def test_before_alone_still_pages_by_started_at(client):
+    traces = [trace(id=f"t{i}", started_at=1000.0 + i) for i in range(4)]
+    client.post("/api/ingest", json={"traces": traces, "spans": []})
+    rest = client.get("/api/traces", params={"before": 1002.0}).json()["traces"]
+    assert [t["id"] for t in rest] == ["t1", "t0"]

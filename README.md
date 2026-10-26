@@ -74,7 +74,7 @@ curl -s http://127.0.0.1:4318/api/stats/models    # per-model tokens, cost, p50/
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/ingest` | Batch-upsert traces and spans (the SDK reports a trace at open and again at close). |
-| `GET /api/traces?limit&before&q` | Newest-first trace summaries with span/token/cost aggregates, cursor-paged. |
+| `GET /api/traces?limit&before&before_id&q` | Newest-first trace summaries with span/token/cost aggregates. Cursor-paged: pass the response's `next_before` and `next_before_id` back (`before` alone skips ties on `started_at`). |
 | `GET /api/traces/{id}` | One trace with its spans in order. |
 | `GET /api/stats/models?since` | Per-model calls, errors, tokens, cost, p50/p95 latency. |
 | `GET /api/stats/timeseries?since&bucket_seconds` | Calls, tokens, cost, errors over time. |
@@ -93,7 +93,12 @@ flowchart LR
 ```
 
 SQLite is deliberate: a self-hosted, single-team tool should install in seconds and keep its data in one file.
-The server opens one serialized connection (CPython's `sqlite3` is compiled thread-safe) and every ingest batch commits atomically.
+The server opens one connection behind a lock, so every ingest batch is its own transaction and commits atomically.
+Another process writing the same file (the demo seeder, for example) is waited for up to five seconds; past that the API answers `503` with `Retry-After`.
+The schema is versioned with `PRAGMA user_version`, and migrations run when the server opens the database.
+Before upgrading a non-empty database, spanlight copies it (mode `0600`) to `<db>.v<N>.bak`, where N is the schema version it found.
+An existing backup is never overwritten, so a partly failed upgrade keeps the original copy.
+A span is identified by `(trace_id, id)` ([ADR 0001](docs/adr/0001-trace-scoped-span-identity.md)).
 
 ## Dashboard
 

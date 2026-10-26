@@ -150,14 +150,15 @@ def working_hours_timestamp(rng: random.Random, now: float, days: int) -> float:
 def seed(path: str, days: int, traces: int, seed_value: int) -> tuple[int, int]:
     rng = random.Random(seed_value)
     now = time.time()
-    conn = db.connect(path)
+    database = db.Database(path)
     all_traces, all_spans = [], []
     for _ in range(traces):
         trace, spans = make_trace(rng, working_hours_timestamp(rng, now, days))
         all_traces.append(trace)
         all_spans.extend(spans)
-    db.ingest(conn, all_traces, all_spans)
-    conn.close()
+    with database.write() as conn:
+        db.ingest(conn, all_traces, all_spans)
+    database.close()
     return len(all_traces), len(all_spans)
 
 

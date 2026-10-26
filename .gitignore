@@ -17,6 +17,8 @@ build/
 *.db
 *.db-wal
 *.db-shm
+# Taken before a schema migration, next to the database
+*.bak
 
 # Node (dashboard)
 node_modules/
