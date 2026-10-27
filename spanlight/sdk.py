@@ -23,6 +23,7 @@ import atexit
 import contextlib
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -47,6 +48,12 @@ DEFAULT_PRICES: dict[str, tuple[float, float]] = {
 }
 
 
+# What may follow a price-table key for the same model: a release date (in the
+# forms providers use), a numbered revision, "latest", or a "preview" tag.
+# Anything else, such as "-5" or "-mini", names a different model.
+_VARIANT_SUFFIX = re.compile(r"-\d{8}|-\d{4}-\d{2}-\d{2}|@\d{8}|-\d{3}|-latest|-preview(-[\w-]+)?")
+
+
 def estimate_cost(
     model: str | None,
     input_tokens: int | None,
@@ -55,8 +62,11 @@ def estimate_cost(
 ) -> float | None:
     """Cost in USD, or None when the model or usage is unknown.
 
-    Dated model ids match their base entry by prefix, longest prefix first
-    (``claude-haiku-4-5-20251001`` -> ``claude-haiku-4-5``).
+    A model id that only adds a release date, revision, ``-latest`` or
+    ``-preview`` tag matches its base entry by prefix, longest first
+    (``claude-haiku-4-5-20251001`` -> ``claude-haiku-4-5``). Any other suffix is
+    a different model, so ``claude-sonnet-5-5`` is not priced as
+    ``claude-sonnet-5`` and ``gpt-5.6-luna-mini`` not as ``gpt-5.6-luna``.
     """
     if model is None or input_tokens is None or output_tokens is None:
         return None
@@ -64,7 +74,7 @@ def estimate_cost(
     entry = table.get(model)
     if entry is None:
         for key in sorted(table, key=len, reverse=True):
-            if model.startswith(key):
+            if model.startswith(key) and _VARIANT_SUFFIX.fullmatch(model[len(key) :]):
                 entry = table[key]
                 break
     if entry is None:

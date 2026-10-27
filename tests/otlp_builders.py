@@ -369,3 +369,35 @@ def otlp_json(request: ExportTraceServiceRequest) -> dict:
                 for link in sp.get("links", []):
                     to_hex(link, "traceId", "spanId")
     return document
+
+
+# -- doc-pilot's real exporter output ---------------------------------------
+
+
+def docpilot_capture() -> list[bytes]:
+    """The protobuf bodies doc-pilot's OTLP exporter sent (the API process,
+    then the worker), captured by fixtures/otlp/capture_docpilot.py."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures/otlp/docpilot_capture.json"
+    document = json.loads(path.read_text())
+    return [base64.b64decode(item["body_base64"]) for item in document["requests"]]
+
+
+def single_span_requests(bodies: list[bytes]) -> list[bytes]:
+    """One request per span, each keeping its resource and scope."""
+    out = []
+    for body in bodies:
+        request = ExportTraceServiceRequest.FromString(body)
+        for rs in request.resource_spans:
+            for ss in rs.scope_spans:
+                for span in ss.spans:
+                    one = ExportTraceServiceRequest()
+                    copy_rs = one.resource_spans.add(schema_url=rs.schema_url)
+                    copy_rs.resource.CopyFrom(rs.resource)
+                    copy_ss = copy_rs.scope_spans.add(schema_url=ss.schema_url)
+                    copy_ss.scope.CopyFrom(ss.scope)
+                    copy_ss.spans.add().CopyFrom(span)
+                    out.append(one.SerializeToString())
+    return out

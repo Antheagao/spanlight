@@ -18,8 +18,15 @@ DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024
 # Connections uvicorn serves at once; the next gets a 503. Sync routes run on
 # a pool of about 40 threads, so more than this only queues.
 DEFAULT_MAX_CONCURRENCY = 64
+# OTLP exports decoded and stored at once. Decoding a request builds objects
+# many times its size, so this bounds that memory; the next export is told to
+# retry.
+DEFAULT_MAX_EXPORTS_IN_FLIGHT = 4
 MIN_TOKEN_CHARS = 32
 LOOPBACK_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+# Span attributes that carry an application's own cost for an LLM call, in
+# order of preference. doc-pilot sends `docpilot.cost_usd`.
+DEFAULT_COST_ATTRIBUTES = ("spanlight.cost_usd", "docpilot.cost_usd")
 
 
 class SettingsError(ValueError):
@@ -67,6 +74,16 @@ def _dev_origins(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(origins)
 
 
+def _cost_attributes(env: Mapping[str, str]) -> tuple[str, ...]:
+    raw = env.get("SPANLIGHT_COST_ATTRIBUTES")
+    if raw is None:
+        return DEFAULT_COST_ATTRIBUTES
+    names = tuple(n.strip() for n in raw.split(",") if n.strip())
+    if any(c.isspace() or not c.isprintable() for n in names for c in n):
+        raise SettingsError("SPANLIGHT_COST_ATTRIBUTES names must not contain whitespace")
+    return names
+
+
 def _token(env: Mapping[str, str]) -> str | None:
     raw = env.get("SPANLIGHT_INGEST_TOKEN")
     if not raw:
@@ -91,10 +108,14 @@ class Settings:
     ingest_token: str | None = None
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    max_exports_in_flight: int = DEFAULT_MAX_EXPORTS_IN_FLIGHT
     # Extra origins, besides the server's own, allowed to make cross-origin
     # requests (CORS and the write Origin check). Empty by default, because
     # trusting a port trusts every program that can serve one on this machine.
     dev_origins: tuple[str, ...] = ()
+    # Attribute names tried, in order, for an LLM span's cost before falling
+    # back to the price table. Empty means always use the price table.
+    cost_attributes: tuple[str, ...] = DEFAULT_COST_ATTRIBUTES
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -128,5 +149,13 @@ class Settings:
                 minimum=1,
                 maximum=100_000,
             ),
+            max_exports_in_flight=_integer(
+                env,
+                "SPANLIGHT_MAX_EXPORTS_IN_FLIGHT",
+                DEFAULT_MAX_EXPORTS_IN_FLIGHT,
+                minimum=1,
+                maximum=1024,
+            ),
             dev_origins=_dev_origins(env),
+            cost_attributes=_cost_attributes(env),
         )

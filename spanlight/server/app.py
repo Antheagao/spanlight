@@ -9,11 +9,13 @@ cross-site writes, and an optional bearer token protects writes.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +24,19 @@ from pydantic import BaseModel, Field
 from . import db, errors
 from .errors import api_error
 from .guard import SECURITY_HEADERS, Guard
+from .otlp import (
+    OtlpDecodeError,
+    decode_json,
+    decode_protobuf,
+    encode_export_response,
+    map_request,
+)
+from .otlp.compression import (
+    DecompressedTooLarge,
+    MalformedCompression,
+    UnsupportedContentEncoding,
+    inflate,
+)
 from .settings import Settings
 
 DEFAULT_DB = "spanlight.db"
@@ -151,10 +166,69 @@ def create_app(
         with database().read() as conn:
             return db.timeseries(conn, since=since, bucket_seconds=bucket_seconds)
 
-    # Unknown /api paths answer with the envelope whatever the method, and are
-    # not handed to the dashboard mount below. This catch-all also matches a
-    # known path with the wrong method, which Starlette would otherwise turn
-    # into a 405 only when nothing later matches fully, so it answers 405 itself.
+    def export_traces(body: bytes, content_type: str, encoding: str | None) -> tuple[bytes, str]:
+        """Decode, map and store one OTLP export; returns the response body and
+        the format it is in. Runs on a worker thread: decompression, decoding
+        and the write are all blocking."""
+        protobuf = content_type.partition(";")[0].strip().lower() == "application/x-protobuf"
+        try:
+            data = inflate(body, encoding, settings.max_request_bytes)
+            request = decode_protobuf(data) if protobuf else decode_json(data)
+        except UnsupportedContentEncoding as error:
+            raise api_error(415, "unsupported_media_type", str(error)) from None
+        except DecompressedTooLarge as error:
+            raise api_error(413, "payload_too_large", str(error)) from None
+        except (MalformedCompression, OtlpDecodeError) as error:
+            raise api_error(400, "invalid_body", str(error)) from None
+        batch = map_request(request, settings.cost_attributes)
+        if batch.spans:
+            with database().write() as conn:
+                db.ingest_otlp(conn, batch.spans)
+        fmt = "protobuf" if protobuf else "json"
+        return encode_export_response(batch.rejected, batch.message, fmt), fmt
+
+    exports_in_flight = threading.BoundedSemaphore(settings.max_exports_in_flight)
+
+    @app.post("/v1/traces")
+    async def otlp_traces(request: Request) -> Response:
+        # Not waiting for a slot: a client told to retry later holds no memory
+        # meanwhile, and OTLP exporters do retry a 503 with Retry-After.
+        if not exports_in_flight.acquire(blocking=False):
+            raise api_error(
+                503,
+                "overloaded",
+                "too many exports in progress, retry",
+                headers={"Retry-After": "1"},
+            )
+        try:
+            # The guard has already read the body within the size cap.
+            body, fmt = await run_in_threadpool(
+                export_traces,
+                await request.body(),
+                request.headers.get("content-type", ""),
+                request.headers.get("content-encoding"),
+            )
+        finally:
+            exports_in_flight.release()
+        media_type = "application/x-protobuf" if fmt == "protobuf" else "application/json"
+        return Response(body, media_type=media_type)
+
+    def traces_only() -> None:
+        raise api_error(404, "not_found", "spanlight accepts traces only")
+
+    for signal in ("metrics", "logs"):
+        app.add_api_route(f"/v1/{signal}", traces_only, methods=["POST"], include_in_schema=False)
+
+    # Unknown /api and /v1 paths answer in their prefix's error format whatever
+    # the method, and are not handed to the dashboard mount below. This
+    # catch-all also matches a known path with the wrong method, which
+    # Starlette would otherwise turn into a 405 only when nothing later matches
+    # fully, so it answers 405 itself.
+    @app.api_route(
+        "/v1/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        include_in_schema=False,
+    )
     @app.api_route(
         "/api/{path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],

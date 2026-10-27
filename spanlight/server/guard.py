@@ -14,10 +14,10 @@ import hashlib
 import hmac
 from urllib.parse import urlsplit
 
-from starlette.responses import JSONResponse
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .errors import envelope
+from .errors import error_response
 from .settings import Settings
 
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -115,28 +115,32 @@ class Guard:
             body = await self._read_body(headers, receive)
         except _PayloadTooLarge:
             cap = self.settings.max_request_bytes
-            response = _refusal(413, "payload_too_large", f"request body exceeds {cap} bytes")
+            response = _refusal(
+                scope, headers, 413, "payload_too_large", f"request body exceeds {cap} bytes"
+            )
             await response(scope, receive, send_with_headers)
             return
         if body is not None:
             await self.app(scope, _replay(body, receive), send_with_headers)
 
-    def _refuse_headers(self, scope: Scope, headers: dict[str, str]) -> JSONResponse | None:
+    def _refuse_headers(self, scope: Scope, headers: dict[str, str]) -> Response | None:
         method = scope["method"]
         # Liveness probes often use the pod or container IP as Host, and the
         # endpoint reveals nothing.
         probe = scope["path"] == "/healthz" and method == "GET"
         if not probe and not self._host_allowed(headers.get("host", "")):
-            return _refusal(400, "invalid_host", "the Host header is not allowed")
+            return _refusal(scope, headers, 400, "invalid_host", "the Host header is not allowed")
         if method not in WRITE_METHODS:
             return None
         origin = headers.get("origin")
         if origin is not None and not self._origin_allowed(
             origin, headers.get("host", ""), scope.get("scheme", "http")
         ):
-            return _refusal(403, "forbidden_origin", "cross-site request refused")
+            return _refusal(scope, headers, 403, "forbidden_origin", "cross-site request refused")
         if self.token_digest is not None and not self._authorized(headers.get("authorization")):
             return _refusal(
+                scope,
+                headers,
                 401,
                 "unauthorized",
                 "a valid bearer token is required",
@@ -149,6 +153,8 @@ class Guard:
         media_type = headers.get("content-type", "").partition(";")[0].strip().lower()
         if has_body and media_type not in ALLOWED_CONTENT_TYPES:
             return _refusal(
+                scope,
+                headers,
                 415,
                 "unsupported_media_type",
                 "content type must be application/json or application/x-protobuf",
@@ -220,6 +226,20 @@ def _replay(body: bytes, receive: Receive) -> Receive:
 
 
 def _refusal(
-    status: int, code: str, message: str, headers: dict[str, str] | None = None
-) -> JSONResponse:
-    return JSONResponse(envelope(code, message), status_code=status, headers=headers)
+    scope: Scope,
+    headers: dict[str, str],
+    status: int,
+    code: str,
+    message: str,
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
+    """An error in the format the route uses: the `/api` envelope, or a
+    `google.rpc.Status` for OTLP's `/v1`."""
+    return error_response(
+        status,
+        code,
+        message,
+        headers=extra_headers,
+        path=scope["path"],
+        content_type=headers.get("content-type"),
+    )

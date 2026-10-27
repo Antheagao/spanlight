@@ -83,6 +83,23 @@ def test_estimate_cost_prefix_match_and_unknowns():
     base = estimate_cost("claude-haiku-4-5", 1_000_000, 1_000_000)
     assert dated == base == pytest.approx(6.00)
     assert estimate_cost("some-unknown-model", 10, 10) is None
+    # A longer name that merely starts with a key is another model.
+    assert estimate_cost("claude-sonnet-5-5", 10, 10) is None
+    assert estimate_cost("claude-haiku-4-5-latest", 1_000_000, 0) == pytest.approx(1.00)
+    assert estimate_cost("claude-haiku-4-5-2025", 10, 10) is None
+    assert estimate_cost("gpt-5.6-luna-mini", 10, 10) is None
+    for variant, base in (
+        ("gpt-5.6-luna-2026-01-15", "gpt-5.6-luna"),
+        ("claude-haiku-4-5@20251001", "claude-haiku-4-5"),
+        ("gemini-3.5-flash-lite-001", "gemini-3.5-flash-lite"),
+        ("gemini-3.5-flash-lite-preview-06-17", "gemini-3.5-flash-lite"),
+        ("gemini-3.7-flash-preview", "gemini-3.7-flash"),
+        ("claude-opus-5-20260101", "claude-opus-5"),
+    ):
+        assert estimate_cost(variant, 1_000_000, 1_000_000) == pytest.approx(
+            estimate_cost(base, 1_000_000, 1_000_000)
+        ), variant
+    assert estimate_cost("claude-haiku-4-5-20251001-beta", 10, 10) is None
     assert estimate_cost("claude-haiku-4-5", None, 10) is None
     assert estimate_cost("mine", 1_000_000, 0, prices={"mine": (3.0, 1.0)}) == pytest.approx(3.0)
     assert set(DEFAULT_PRICES) >= {"claude-haiku-4-5", "gpt-5.6-luna", "gemini-3.5-flash-lite"}

@@ -18,12 +18,13 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .migrations import migrate
+from .otlp.values import dumps_json_safe
 
 log = logging.getLogger(__name__)
 
@@ -206,7 +207,11 @@ TRACE_DEFAULTS = {"status": "ok", "metadata": {}}
 SPAN_DEFAULTS = {"kind": "other", "status": "ok", "attributes": {}}
 TRACE_REQUIRED = ("id", "name", "started_at")
 SPAN_REQUIRED = ("id", "trace_id", "name", "started_at")
-JSON_COLUMNS = ("metadata", "attributes")
+JSON_COLUMNS = ("metadata", "attributes", "events", "links", "otel")
+# What the OTLP path adds: where the span ran and the parts of OTLP that have
+# no column of their own.
+OTLP_SPAN_COLUMNS = (*SPAN_COLUMNS, "service", "events", "links", "otel")
+OTLP_SPAN_DEFAULTS = {**SPAN_DEFAULTS, "events": [], "links": [], "otel": {}}
 
 
 def _upsert(
@@ -217,6 +222,7 @@ def _upsert(
     required: tuple[str, ...],
     defaults: dict[str, Any],
     row: dict,
+    dumps: Callable[[Any], str] = json.dumps,
 ) -> None:
     placeholders = ", ".join("?" for _ in columns)
     updates = ", ".join(f"{c} = excluded.{c}" for c in columns if c not in key)
@@ -227,7 +233,7 @@ def _upsert(
             if c in required:
                 raise ValueError(f"{table} row is missing required field {c!r}")
             value = defaults.get(c)
-        values.append(json.dumps(value) if c in JSON_COLUMNS and value is not None else value)
+        values.append(dumps(value) if c in JSON_COLUMNS and value is not None else value)
     conn.execute(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT({', '.join(key)}) DO UPDATE SET {updates}",
@@ -248,6 +254,119 @@ def ingest(conn: sqlite3.Connection, traces: list[dict], spans: list[dict]) -> N
         _upsert(
             conn, "spans", SPAN_COLUMNS, ("trace_id", "id"), SPAN_REQUIRED, SPAN_DEFAULTS, span
         )
+
+
+def ingest_otlp(conn: sqlite3.Connection, spans: list[dict]) -> None:
+    """Upsert OTLP spans (as `otlp.mapping` produces them) and derive their
+    traces. Runs in the caller's transaction.
+
+    OTLP sends spans, never traces, and a trace's spans arrive in any order and
+    batch (children usually export before their root). So a trace row is never
+    taken from a request: it is recomputed from the stored spans after every
+    upsert. The result then depends only on which spans have arrived, not on
+    their order, and resending a batch changes nothing.
+    """
+    first_span: dict[str, dict] = {}
+    for span in spans:
+        first_span.setdefault(span["trace_id"], span)
+    # A stub only satisfies the foreign key; _derive_trace overwrites it. An
+    # existing row, including an SDK trace, is left as it is.
+    for trace_id, span in first_span.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO traces (id, name, started_at, source) VALUES (?, ?, ?, 'otlp')",
+            [trace_id, span["name"], span["started_at"]],
+        )
+    stored_contexts: set[tuple[str, str, str]] = set()
+    for span in spans:
+        _upsert(
+            conn, "spans", OTLP_SPAN_COLUMNS, ("trace_id", "id"), SPAN_REQUIRED,
+            OTLP_SPAN_DEFAULTS, span, dumps=dumps_json_safe,
+        )
+        for table, context in zip(("resources", "scopes"), span["contexts"].values(), strict=True):
+            key = (table, span["trace_id"], context.digest)
+            if key not in stored_contexts:
+                stored_contexts.add(key)
+                conn.execute(
+                    f"INSERT OR IGNORE INTO {table} (trace_id, digest, data) VALUES (?, ?, ?)",
+                    [span["trace_id"], context.digest, dumps_json_safe(context.data)],
+                )
+    for trace_id in first_span:
+        _derive_trace(conn, trace_id)
+
+
+# Attributes that name the conversation a trace belongs to, in order of preference.
+SESSION_ATTRIBUTES = ("session.id", "gen_ai.conversation.id")
+
+
+def _derive_trace(conn: sqlite3.Connection, trace_id: str) -> None:
+    """Recompute an OTLP trace row from its stored spans.
+
+    The window is the earliest start to the latest end. The name, status and
+    root span id come from the root (the earliest span without a parent);
+    until a root arrives, the name is the earliest span's and the status is
+    error if any span failed. Every choice has a (started_at, id) tiebreak, so
+    equal timestamps cannot make the result depend on arrival order.
+    """
+    window = conn.execute(
+        "SELECT MIN(started_at), MAX(ended_at), COALESCE(MAX(status = 'error'), 0)"
+        " FROM spans WHERE trace_id = ?",
+        [trace_id],
+    ).fetchone()
+    root = conn.execute(
+        "SELECT id, name, status FROM spans WHERE trace_id = ? AND parent_id IS NULL"
+        " ORDER BY started_at, id LIMIT 1",
+        [trace_id],
+    ).fetchone()
+    if root is not None:
+        name, status, root_id = root["name"], root["status"], root["id"]
+    else:
+        earliest = conn.execute(
+            "SELECT name FROM spans WHERE trace_id = ? ORDER BY started_at, id LIMIT 1",
+            [trace_id],
+        ).fetchone()
+        name, status, root_id = earliest["name"], "error" if window[2] else "ok", None
+    session = None
+    for attribute in SESSION_ATTRIBUTES:
+        found = conn.execute(
+            "SELECT json_extract(attributes, ?) FROM spans WHERE trace_id = ?"
+            " AND json_type(attributes, ?) = 'text' AND json_extract(attributes, ?) != ''"
+            " ORDER BY started_at, id LIMIT 1",
+            [f'$."{attribute}"', trace_id, f'$."{attribute}"', f'$."{attribute}"'],
+        ).fetchone()
+        if found is not None:
+            session = found[0]
+            break
+    conn.execute(
+        "UPDATE traces SET name = ?, started_at = ?, ended_at = ?, status = ?, session = ?,"
+        " root_span_id = ? WHERE id = ? AND source = 'otlp'",
+        [name, window[0], window[1], status, session, root_id, trace_id],
+    )
+    # A resent span may point at a different resource or scope than before; keep
+    # only what the stored spans still refer to, so the rows depend on the
+    # spans alone.
+    for table, member in (("resources", "resource"), ("scopes", "scope")):
+        conn.execute(
+            f"DELETE FROM {table} WHERE trace_id = ? AND digest NOT IN"
+            f" (SELECT json_extract(otel, '$.{member}') FROM spans WHERE trace_id = ?"
+            f" AND json_extract(otel, '$.{member}') IS NOT NULL)",
+            [trace_id, trace_id],
+        )
+
+
+def _services(conn: sqlite3.Connection, trace_ids: list[str]) -> dict[str, list[str]]:
+    """The distinct service names of each trace's spans, sorted."""
+    if not trace_ids:
+        return {}
+    marks = ", ".join("?" for _ in trace_ids)
+    rows = conn.execute(
+        f"SELECT trace_id, service FROM spans WHERE trace_id IN ({marks})"
+        " AND service IS NOT NULL GROUP BY trace_id, service ORDER BY trace_id, service",
+        trace_ids,
+    ).fetchall()
+    services: dict[str, list[str]] = {trace_id: [] for trace_id in trace_ids}
+    for row in rows:
+        services[row["trace_id"]].append(row["service"])
+    return services
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -302,7 +421,11 @@ def list_traces(
         params.append(f"%{q}%")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(LIST_TRACES_SQL.format(where=where_sql), [*params, limit]).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    traces = [_row_to_dict(r) for r in rows]
+    services = _services(conn, [t["id"] for t in traces])
+    for trace in traces:
+        trace["services"] = services[trace["id"]]
+    return traces
 
 
 def get_trace(conn: sqlite3.Connection, trace_id: str) -> dict | None:
@@ -314,6 +437,15 @@ def get_trace(conn: sqlite3.Connection, trace_id: str) -> dict | None:
     ).fetchall()
     result = _row_to_dict(trace)
     result["spans"] = [_row_to_dict(s) for s in spans]
+    result["services"] = _services(conn, [trace_id])[trace_id]
+    # Shared by the spans that name them in `otel.resource` and `otel.scope`.
+    for key, table in (("resources", "resources"), ("scopes", "scopes")):
+        result[key] = {
+            row["digest"]: json.loads(row["data"])
+            for row in conn.execute(
+                f"SELECT digest, data FROM {table} WHERE trace_id = ? ORDER BY digest", [trace_id]
+            )
+        }
     return result
 
 

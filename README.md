@@ -78,6 +78,7 @@ curl -s http://127.0.0.1:4318/api/stats/models    # per-model tokens, cost, p50/
 | `GET /api/traces/{id}` | One trace with its spans in order. |
 | `GET /api/stats/models?since` | Per-model calls, errors, tokens, cost, p50/p95 latency. |
 | `GET /api/stats/timeseries?since&bucket_seconds` | Calls, tokens, cost, errors over time. |
+| `POST /v1/traces` | OTLP/HTTP trace ingest (protobuf or JSON, optional gzip). See below. |
 | `GET /healthz` | Database round-trip check. |
 
 Errors under `/api` have one shape: `{"error": {"code": "invalid_body", "message": "...", "field": "spans[0].kind"}}`.
@@ -113,6 +114,40 @@ The checks below still apply on every request, because a page open in your brows
   The interactive API docs and the OpenAPI schema are not served.
 
 Configuration is read once at startup, and a malformed value stops the server with a message naming the variable.
+
+## OpenTelemetry ingest
+
+spanlight accepts OTLP/HTTP traces, so any OpenTelemetry SDK or collector can send to it, with no spanlight SDK.
+Point the exporter at the server (the default port is the standard OTLP/HTTP port):
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or http/json
+```
+
+`POST /v1/traces` takes `application/x-protobuf` or `application/json`, optionally gzip or deflate compressed, and answers in the request's encoding.
+Spans that cannot be stored (a trace or span id of the wrong length or all zeros, no start time) are reported in `partial_success.rejected_spans`, and the rest are stored.
+Errors are `google.rpc.Status` bodies, and a busy database is a `503` with `Retry-After`, which exporters retry.
+Metrics and logs are refused with a `404`.
+The ingest token, the size cap and the Host and Origin checks apply to this route like any other write.
+
+How a span is mapped:
+
+- **Traces are derived.**
+  OTLP sends spans, never traces, and a trace's spans arrive in any order and any batch.
+  A trace's name, status, time window, session and root span are recomputed from its stored spans, so arrival order does not matter and resending a batch changes nothing.
+  The name and status come from the root span (the earliest span with no parent); the session is the `session.id` or `gen_ai.conversation.id` attribute.
+- **Kinds** come from `gen_ai.operation.name`: `chat`, `text_completion` and `generate_content` are `llm`, `execute_tool` is `tool`, `retrieval` is `retrieval`, and everything else is `other`.
+- **Only `llm` spans fill the model, token and cost columns.**
+  Instrumentation often puts a rolled-up cost on a parent span such as `invoke_agent`, and counting it too would double the trace's cost.
+  The model is `gen_ai.response.model`, else `gen_ai.request.model`; tokens are `gen_ai.usage.input_tokens` and `output_tokens`.
+- **Cost** is the first valid number among the span attributes named in `SPANLIGHT_COST_ATTRIBUTES` (default `spanlight.cost_usd,docpilot.cost_usd`), because the application knows its cache and batch pricing.
+  Otherwise it is estimated from the bundled price table, and otherwise it is unknown.
+  The source is kept in the span's `otel.cost_source`.
+- **Errors**: an `ERROR` status makes the span an error, with its status message or, failing that, the last `exception` event.
+- **Message content** is stored only if the instrumentation sends `gen_ai.input.messages` or `gen_ai.output.messages`.
+- **Everything else** is kept: all attributes, `events`, `links`, the service name, and an `otel` object with the span kind, scope, resource and dropped counts.
+- Over 128 attributes, events or links per span are dropped and counted, strings are cut at 32 KiB, and values JSON cannot hold (`NaN`, integers beyond 2^53) are stored as strings.
 
 ## Architecture
 
@@ -158,6 +193,7 @@ ruff check .
 - [x] Python SDK: trace/span context managers, cost table, buffered background flush
 - [x] React dashboard: stat tiles, calls/spend over time, model stats, trace list, span waterfall
 - [x] Demo seeder so the dashboard renders without any LLM keys
+- [x] OpenTelemetry ingest: OTLP/HTTP traces from any OpenTelemetry SDK
 - [ ] OpenTelemetry bridge: mirror spans to any OTLP collector
 
 ## License

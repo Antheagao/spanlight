@@ -530,3 +530,12 @@ def test_the_server_is_started_with_the_concurrency_limit(monkeypatch, tmp_path)
     monkeypatch.setenv("SPANLIGHT_MAX_CONCURRENCY", "12")
     entry.main()
     assert started == {"host": "127.0.0.1", "port": 4999, "limit_concurrency": 12}
+
+
+def test_cost_attributes_default_and_can_be_listed_or_emptied():
+    assert Settings.from_env({}).cost_attributes == ("spanlight.cost_usd", "docpilot.cost_usd")
+    listed = Settings.from_env({"SPANLIGHT_COST_ATTRIBUTES": " a.cost , b.cost,, "})
+    assert listed.cost_attributes == ("a.cost", "b.cost")
+    assert Settings.from_env({"SPANLIGHT_COST_ATTRIBUTES": ""}).cost_attributes == ()
+    with pytest.raises(SettingsError, match="SPANLIGHT_COST_ATTRIBUTES"):
+        Settings.from_env({"SPANLIGHT_COST_ATTRIBUTES": "a b"})

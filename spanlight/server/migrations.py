@@ -110,11 +110,35 @@ CREATE INDEX traces_started_id_idx ON traces(started_at DESC, id DESC);
 DROP INDEX traces_started_idx;
 """
 
+# An OTLP resource (the process that emitted spans) and scope (the library)
+# are shared by every span they emit, and can be large. Storing them in each
+# span's `otel` would multiply their size by the span count, so each distinct
+# one is kept once per trace, and a span refers to it by digest. They are
+# removed with their trace.
+_OTLP_CONTEXTS = """
+CREATE TABLE resources (
+  trace_id TEXT NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+  -- sha256 of the canonical JSON of `data`.
+  digest   TEXT NOT NULL,
+  -- {"attributes", "dropped_attributes_count", "schema_url"}
+  data     TEXT NOT NULL,
+  PRIMARY KEY (trace_id, digest)
+);
+CREATE TABLE scopes (
+  trace_id TEXT NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+  digest   TEXT NOT NULL,
+  -- {"name", "version", "attributes", "dropped_attributes_count", "schema_url"}
+  data     TEXT NOT NULL,
+  PRIMARY KEY (trace_id, digest)
+);
+"""
+
 # (version, name, SQL). Versions are consecutive from 1.
 MIGRATIONS: list[tuple[int, str, str]] = [
     (1, "baseline", _BASELINE),
     (2, "trace_scoped_spans", _TRACE_SCOPED_SPANS),
     (3, "traces_paging_index", _TRACES_PAGING_INDEX),
+    (4, "otlp_contexts", _OTLP_CONTEXTS),
 ]
 
 
