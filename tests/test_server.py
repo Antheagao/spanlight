@@ -1,14 +1,4 @@
 import pytest
-from fastapi.testclient import TestClient
-
-from spanlight.server import create_app
-
-
-@pytest.fixture()
-def client(tmp_path):
-    app = create_app(db_path=str(tmp_path / "test.db"))
-    with TestClient(app) as c:
-        yield c
 
 
 def trace(id="t1", name="chat-request", started_at=1000.0, **kw):
@@ -73,7 +63,9 @@ def test_ingest_is_an_upsert(client):
 
 
 def test_trace_not_found(client):
-    assert client.get("/api/traces/nope").status_code == 404
+    r = client.get("/api/traces/nope")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "trace_not_found"
 
 
 def test_list_aggregates_and_pagination(client):
@@ -143,8 +135,15 @@ def test_timeseries_buckets(client):
 
 def test_validation_rejects_bad_payloads(client):
     bad = span(input_tokens=-1)
-    assert client.post("/api/ingest", json={"traces": [], "spans": [bad]}).status_code == 422
-    assert client.post("/api/ingest", json={"spans": [{"id": "x"}]}).status_code == 422
+    r = client.post("/api/ingest", json={"traces": [], "spans": [bad]})
+    assert r.status_code == 400
+    assert r.json()["error"] == {
+        "code": "invalid_body",
+        "message": "Input should be greater than or equal to 0",
+        "field": "spans[0].input_tokens",
+    }
+    r = client.post("/api/ingest", json={"spans": [{"id": "x"}]})
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "invalid_body")
 
 
 def test_paging_through_traces_with_equal_started_at_loses_and_repeats_nothing(client):

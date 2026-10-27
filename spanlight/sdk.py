@@ -22,6 +22,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -217,6 +218,7 @@ class Spanlight:
         endpoint: str = "http://127.0.0.1:4318",
         *,
         session: str | None = None,
+        token: str | None = None,
         prices: dict[str, tuple[float, float]] | None = None,
         flush_interval: float = 2.0,
         max_batch: int = 500,
@@ -226,6 +228,8 @@ class Spanlight:
     ):
         self._endpoint = endpoint.rstrip("/")
         self._session = session
+        # Sent as a bearer token when the server requires one. Never logged.
+        self._token = token if token is not None else os.environ.get("SPANLIGHT_INGEST_TOKEN")
         self._prices = prices
         self._flush_interval = flush_interval
         self._max_batch = max_batch
@@ -282,10 +286,11 @@ class Spanlight:
 
     def _send(self, traces: list[dict], spans: list[dict]) -> None:
         body = json.dumps({"traces": traces, "spans": spans}).encode()
+        headers = {"content-type": "application/json"}
+        if self._token:
+            headers["authorization"] = f"Bearer {self._token}"
         request = urllib.request.Request(
-            f"{self._endpoint}/api/ingest",
-            data=body,
-            headers={"content-type": "application/json"},
+            f"{self._endpoint}/api/ingest", data=body, headers=headers
         )
         try:
             urllib.request.urlopen(request, timeout=self._timeout).close()

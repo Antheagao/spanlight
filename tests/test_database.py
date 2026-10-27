@@ -1,4 +1,5 @@
 import sqlite3
+import stat
 import threading
 import time
 
@@ -113,9 +114,9 @@ def test_a_read_can_run_inside_a_write(tmp_path):
     database.close()
 
 
-def test_a_busy_database_is_a_retryable_503(tmp_path):
+def test_a_busy_database_is_a_retryable_503(tmp_path, settings):
     path = tmp_path / "busy.db"
-    app = create_app(db_path=str(path), busy_timeout_ms=50)
+    app = create_app(db_path=str(path), settings=settings, busy_timeout_ms=50)
     payload = {"traces": [{k: v for k, v in TRACE.items() if v is not None}], "spans": []}
     with TestClient(app) as client:
         other_process = sqlite3.connect(path, isolation_level=None)
@@ -240,8 +241,8 @@ def test_a_read_only_database_file_fails_fast(tmp_path):
     assert time.monotonic() - started < 2
 
 
-def test_waiting_for_the_in_process_lock_is_bounded_by_the_busy_timeout(tmp_path):
-    app = create_app(db_path=str(tmp_path / "wait.db"), busy_timeout_ms=100)
+def test_waiting_for_the_in_process_lock_is_bounded_by_the_busy_timeout(tmp_path, settings):
+    app = create_app(db_path=str(tmp_path / "wait.db"), settings=settings, busy_timeout_ms=100)
     payload = {"traces": [{"id": "t", "name": "n", "started_at": 1.0}], "spans": []}
     with TestClient(app) as client:
         holding, release = threading.Event(), threading.Event()
@@ -268,9 +269,14 @@ def test_waiting_for_the_in_process_lock_is_bounded_by_the_busy_timeout(tmp_path
     assert recovered.status_code == 202
 
 
-def test_before_id_without_before_is_a_bad_request(tmp_path):
-    with TestClient(create_app(db_path=str(tmp_path / "cursor.db"))) as client:
-        assert client.get("/api/traces", params={"before_id": "x"}).status_code == 400
+def test_before_id_without_before_is_a_bad_request(client):
+    r = client.get("/api/traces", params={"before_id": "x"})
+    assert r.status_code == 400
+    assert r.json()["error"] == {
+        "code": "invalid_body",
+        "message": "before_id requires before",
+        "field": "before_id",
+    }
 
 
 @pytest.mark.parametrize("calls", [1, 2, 3, 4, 7, 10, 21, 100])
@@ -296,3 +302,39 @@ def test_model_stats_percentiles_are_nearest_rank_over_the_sorted_latencies(tmp_
     assert stats["cost_usd"] == pytest.approx(0.5 * calls)
     assert stats["latency_p50"] == pytest.approx(p50)
     assert stats["latency_p95"] == pytest.approx(p95)
+
+
+def test_a_new_database_and_its_wal_files_are_private(tmp_path):
+    path = tmp_path / "private.db"
+    database = db.Database(path)
+    with database.write() as conn:
+        db.ingest(conn, [trace("a")], [])
+
+    modes = {p.name: stat.S_IMODE(p.stat().st_mode) for p in tmp_path.glob("private.db*")}
+    database.close()
+
+    assert modes["private.db"] == 0o600
+    assert set(modes) >= {"private.db-wal", "private.db-shm"}
+    assert set(modes.values()) == {0o600}
+
+
+def test_an_existing_database_keeps_its_mode_but_a_readable_one_is_reported(tmp_path, caplog):
+    path = tmp_path / "shared.db"
+    db.connect(path).close()
+    path.chmod(0o644)
+    caplog.clear()
+
+    with caplog.at_level("WARNING", logger="spanlight.server.db"):
+        db.connect(path).close()
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert any("readable by other users" in r.message for r in caplog.records)
+
+
+def test_a_private_existing_database_logs_nothing(tmp_path, caplog):
+    path = tmp_path / "mine.db"
+    db.connect(path).close()
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="spanlight.server.db"):
+        db.connect(path).close()
+    assert caplog.records == []

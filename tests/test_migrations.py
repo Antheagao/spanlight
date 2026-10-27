@@ -154,10 +154,10 @@ def test_legacy_database_migrates_with_data_preserved_and_backed_up(tmp_path):
     restored.close()
 
 
-def test_migrated_legacy_database_serves_through_the_api(tmp_path):
+def test_migrated_legacy_database_serves_through_the_api(tmp_path, settings):
     path = tmp_path / "legacy.db"
     make_legacy(path)
-    with TestClient(create_app(db_path=str(path))) as client:
+    with TestClient(create_app(db_path=str(path), settings=settings)) as client:
         detail = client.get("/api/traces/t1").json()
         assert [s["id"] for s in detail["spans"]] == ["s1-0", "s1-1", "s1-2", "s1-3"]
         assert detail["spans"][0]["attributes"] == {"k": [1, 2]}

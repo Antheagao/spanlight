@@ -1,27 +1,28 @@
 """The spanlight HTTP API.
 
 A deliberately small surface: one ingest endpoint the SDK batches into, and
-read endpoints the dashboard renders from. No auth: spanlight is designed to
-run on localhost or inside a private network, like a dev-tools daemon.
+read endpoints the dashboard renders from. spanlight is a dev-tools daemon
+for localhost or a private network: guard.py refuses foreign Hosts and
+cross-site writes, and an optional bearer token protects writes.
 """
 
 from __future__ import annotations
 
-import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db
-
-log = logging.getLogger(__name__)
+from . import db, errors
+from .errors import api_error
+from .guard import SECURITY_HEADERS, Guard
+from .settings import Settings
 
 DEFAULT_DB = "spanlight.db"
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent.parent / "dashboard" / "dist"
@@ -62,9 +63,13 @@ class IngestIn(BaseModel):
 
 
 def create_app(
-    db_path: str | None = None, *, busy_timeout_ms: int = db.BUSY_TIMEOUT_MS
+    db_path: str | None = None,
+    *,
+    settings: Settings | None = None,
+    busy_timeout_ms: int = db.BUSY_TIMEOUT_MS,
 ) -> FastAPI:
     path = db_path or os.environ.get("SPANLIGHT_DB", DEFAULT_DB)
+    settings = settings or Settings.from_env(os.environ)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -72,25 +77,24 @@ def create_app(
         yield
         app.state.db.close()
 
-    app = FastAPI(title="spanlight", lifespan=lifespan)
+    # The interactive docs load scripts from a CDN, which the CSP blocks, so
+    # they would render blank; and the schema has no other consumer.
+    app = FastAPI(
+        title="spanlight", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+    )
+    app.state.settings = settings
+    errors.install(app, SECURITY_HEADERS)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=list(settings.dev_origins),
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Added last, so outermost: it sees every request first.
+    app.add_middleware(Guard, settings=settings)
 
     def database() -> db.Database:
         return app.state.db
-
-    @app.exception_handler(db.DatabaseBusy)
-    def database_busy(request: Request, exc: db.DatabaseBusy) -> JSONResponse:
-        # Another process held the write lock past the busy timeout. Clients
-        # (including OTLP exporters) treat 503 + Retry-After as retryable.
-        log.warning("%s %s: database busy", request.method, request.url.path)
-        return JSONResponse(
-            {"detail": "database busy, retry"}, status_code=503, headers={"Retry-After": "1"}
-        )
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -116,7 +120,7 @@ def create_app(
         q: str | None = Query(default=None, max_length=512),
     ) -> dict:
         if before_id is not None and before is None:
-            raise HTTPException(status_code=400, detail="before_id requires before")
+            raise api_error(400, "invalid_body", "before_id requires before", field="before_id")
         with database().read() as conn:
             traces = db.list_traces(conn, limit=limit, before=before, before_id=before_id, q=q)
         last = traces[-1] if len(traces) == limit else None
@@ -131,7 +135,7 @@ def create_app(
         with database().read() as conn:
             trace = db.get_trace(conn, trace_id)
         if trace is None:
-            raise HTTPException(status_code=404, detail="trace not found")
+            raise api_error(404, "trace_not_found", "trace not found")
         return trace
 
     @app.get("/api/stats/models")
@@ -146,6 +150,36 @@ def create_app(
     ) -> list[dict]:
         with database().read() as conn:
             return db.timeseries(conn, since=since, bucket_seconds=bucket_seconds)
+
+    # Unknown /api paths answer with the envelope whatever the method, and are
+    # not handed to the dashboard mount below. This catch-all also matches a
+    # known path with the wrong method, which Starlette would otherwise turn
+    # into a 405 only when nothing later matches fully, so it answers 405 itself.
+    @app.api_route(
+        "/api/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        include_in_schema=False,
+    )
+    def unknown_api_route(request: Request) -> None:
+        path = request.url.path
+        allowed = sorted(
+            {
+                method
+                for route in app.routes
+                if isinstance(route, APIRoute)
+                and route.endpoint is not unknown_api_route
+                and route.path_regex.match(path)
+                for method in route.methods
+            }
+        )
+        if allowed:
+            raise api_error(
+                405,
+                "method_not_allowed",
+                "method not allowed",
+                headers={"Allow": ", ".join(allowed)},
+            )
+        raise api_error(404, "not_found", "no such route")
 
     if DASHBOARD_DIST.is_dir():
         app.mount("/", StaticFiles(directory=DASHBOARD_DIST, html=True), name="dashboard")

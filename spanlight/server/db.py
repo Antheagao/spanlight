@@ -11,7 +11,10 @@ them inside one `Database.write()` transaction.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import os
 import sqlite3
 import threading
 import time
@@ -21,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from .migrations import migrate
+
+log = logging.getLogger(__name__)
 
 # How long a statement waits for another process's write lock, and a request
 # for another thread's use of the connection.
@@ -77,6 +82,25 @@ def _enable_wal(conn: sqlite3.Connection, timeout_ms: int) -> None:
         return
 
 
+def _create_private(path: str | Path) -> None:
+    """Create the database file readable by its owner only: it holds prompts
+    and completions, and SQLite would create it 0644. SQLite gives the -wal and
+    -shm files the same mode. An existing file is never changed silently, but a
+    group or world readable one is reported."""
+    # Two processes starting at once may both get here; the loser finds the
+    # file the winner made.
+    with contextlib.suppress(FileExistsError):
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    mode = os.stat(path).st_mode
+    if mode & 0o044:
+        log.warning(
+            "%s is readable by other users (mode %o); it holds prompts and completions, "
+            "so consider chmod 600",
+            path,
+            mode & 0o777,
+        )
+
+
 def connect(path: str | Path, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     """Open and migrate the database. The connection is in autocommit mode
     (`isolation_level=None`): transactions are explicit, via `Database`.
@@ -86,6 +110,7 @@ def connect(path: str | Path, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3
     comes up instead of failing; `busy_timeout_ms` applies once it is open."""
     if str(path) in ("", ":memory:"):
         raise ValueError(f"spanlight needs a database file, not {str(path)!r}")
+    _create_private(path)
     conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     try:
         conn.row_factory = sqlite3.Row

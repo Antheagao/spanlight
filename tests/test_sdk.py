@@ -88,7 +88,7 @@ def test_estimate_cost_prefix_match_and_unknowns():
     assert set(DEFAULT_PRICES) >= {"claude-haiku-4-5", "gpt-5.6-luna", "gemini-3.5-flash-lite"}
 
 
-def test_sdk_payloads_are_accepted_by_the_server(tmp_path, monkeypatch):
+def test_sdk_payloads_are_accepted_by_the_server(tmp_path, monkeypatch, settings):
     """End to end without the network: everything the SDK emits must ingest
     cleanly and read back through the server API."""
     sdk = Spanlight(enabled=True, flush_interval=3600)
@@ -103,7 +103,7 @@ def test_sdk_payloads_are_accepted_by_the_server(tmp_path, monkeypatch):
     sdk.flush()
     traces, spans = flat(batches)
 
-    app = create_app(db_path=str(tmp_path / "e2e.db"))
+    app = create_app(db_path=str(tmp_path / "e2e.db"), settings=settings)
     with TestClient(app) as http:
         r = http.post("/api/ingest", json={"traces": traces, "spans": spans})
         assert r.status_code == 202
@@ -113,3 +113,52 @@ def test_sdk_payloads_are_accepted_by_the_server(tmp_path, monkeypatch):
         listed = http.get("/api/traces").json()["traces"][0]
         assert listed["llm_calls"] == 1
         assert listed["cost_usd"] == pytest.approx(420 * 1.00 / 1e6 + 180 * 5.00 / 1e6)
+
+
+def sent_requests(monkeypatch, client, *, fail=None):
+    """Capture what `_send` would put on the wire."""
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if fail:
+            raise fail
+
+        class Response:
+            def close(self):
+                pass
+
+        return Response()
+
+    monkeypatch.setattr("spanlight.sdk.urllib.request.urlopen", fake_urlopen)
+    client._send([], [])
+    return requests
+
+
+def test_token_is_sent_as_a_bearer_header(monkeypatch):
+    monkeypatch.delenv("SPANLIGHT_INGEST_TOKEN", raising=False)
+    client = Spanlight(enabled=False, token="s" * 40)
+    (request,) = sent_requests(monkeypatch, client)
+    assert request.get_header("Authorization") == "Bearer " + "s" * 40
+
+
+def test_token_defaults_to_the_environment(monkeypatch):
+    monkeypatch.setenv("SPANLIGHT_INGEST_TOKEN", "e" * 40)
+    (request,) = sent_requests(monkeypatch, Spanlight(enabled=False))
+    assert request.get_header("Authorization") == "Bearer " + "e" * 40
+
+
+def test_no_token_sends_no_authorization_header(monkeypatch):
+    monkeypatch.delenv("SPANLIGHT_INGEST_TOKEN", raising=False)
+    (request,) = sent_requests(monkeypatch, Spanlight(enabled=False))
+    assert request.get_header("Authorization") is None
+
+
+def test_the_token_never_appears_in_the_warning(monkeypatch):
+    import urllib.error
+
+    client = Spanlight(enabled=False, token="secret-" + "s" * 40)
+    failure = urllib.error.URLError("connection refused")
+    with pytest.warns(UserWarning) as warned:
+        sent_requests(monkeypatch, client, fail=failure)
+    assert "secret-" not in str(warned[0].message)

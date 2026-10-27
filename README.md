@@ -80,7 +80,39 @@ curl -s http://127.0.0.1:4318/api/stats/models    # per-model tokens, cost, p50/
 | `GET /api/stats/timeseries?since&bucket_seconds` | Calls, tokens, cost, errors over time. |
 | `GET /healthz` | Database round-trip check. |
 
-There is deliberately no auth: spanlight is a dev-tools daemon for localhost or a private network, not a multi-tenant service.
+Errors under `/api` have one shape: `{"error": {"code": "invalid_body", "message": "...", "field": "spans[0].kind"}}`.
+`code` is stable and meant to be branched on, and `field` appears only when one input is at fault.
+Validation failures are `400 invalid_body`, an unknown route is `404 not_found`, and a busy database is `503 database_busy` with `Retry-After`.
+
+## Security model
+
+spanlight is a dev-tools daemon for localhost or a private network, not a multi-tenant service.
+It binds to `127.0.0.1` by default and has no login.
+The checks below still apply on every request, because a page open in your browser can reach a loopback server.
+
+- **Host allowlist.** Every request, including the dashboard, must name `localhost`, `127.0.0.1` or `[::1]` in its `Host` header, with any port.
+  This stops DNS rebinding from reading your stored prompts.
+  Add names with `SPANLIGHT_ALLOWED_HOSTS` (comma separated), for example `host.docker.internal` when an app in a container sends traces.
+  `GET /healthz` is exempt, because it reveals nothing and probes often use a container or pod IP as the host.
+- **Writes.** `POST`, `PUT`, `PATCH` and `DELETE` are refused with `403` when their `Origin` is not the request's own host and port.
+  A request that carries a body is refused with `415` unless its content type is `application/json` or `application/x-protobuf`.
+  A browser form or `text/plain` request needs no CORS preflight, so refusing those types is what keeps other sites from writing.
+  Behind a TLS proxy, uvicorn must be told to trust it (`FORWARDED_ALLOW_IPS=<proxy ip>`), so it reports `https` and a default-port `Origin` matches the `Host`.
+  To let a page on another origin call the API (CORS and writes), list it in `SPANLIGHT_DEV_ORIGINS`, comma separated.
+  It is empty by default, because trusting an origin trusts every program on this machine that can serve it.
+- **Ingest token.** Set `SPANLIGHT_INGEST_TOKEN` (at least 32 printable characters, no whitespace) and every write must send `Authorization: Bearer <token>`.
+  The SDK reads the same variable, or takes `Spanlight(token=...)`.
+  Reads stay open, because the dashboard has no login.
+- **Local readers.** With no token on loopback, any process or user on this machine can read stored prompts and completions over HTTP.
+  The database file is created with mode `0600`, so the file itself is private to your user, and the server warns at startup if an existing file is group or world readable.
+- **Network binds.** Setting `SPANLIGHT_HOST` to anything other than a loopback address requires a token, and the server refuses to start without one.
+  Binding beyond loopback also exposes reads to that network, so put it behind your own access control.
+- **Limits.** Request bodies are capped at 16 MiB (`SPANLIGHT_MAX_REQUEST_BYTES`), counted as they arrive, and refused with `413` before anything is parsed.
+  At most 64 connections are served at once (`SPANLIGHT_MAX_CONCURRENCY`), and the next gets a plain `503` from the server.
+- **Headers.** Every response carries a strict `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy: same-origin`.
+  The interactive API docs and the OpenAPI schema are not served.
+
+Configuration is read once at startup, and a malformed value stops the server with a message naming the variable.
 
 ## Architecture
 
@@ -108,6 +140,8 @@ cd dashboard && npm install && npm run build   # the server serves dashboard/dis
 
 Open http://127.0.0.1:4318/ with the server running.
 For dashboard development, `npm run dev` serves it on :5173 with API calls proxied to :4318.
+The dashboard only reads, so nothing else is needed.
+The dev proxy rewrites the `Host` header, so a dev page that writes through it also needs `SPANLIGHT_DEV_ORIGINS=http://localhost:5173` on the server.
 
 ## Development
 
