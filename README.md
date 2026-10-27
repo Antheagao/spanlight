@@ -148,6 +148,7 @@ The dev proxy rewrites the `Host` header, so a dev page that writes through it a
 ```bash
 pip install -e ".[server,dev]"
 pytest          # API + SDK tests over a temp database
+HYPOTHESIS_PROFILE=deep pytest tests/test_otlp_decode.py   # fuzz the OTLP decoder harder
 ruff check .
 ```
 
