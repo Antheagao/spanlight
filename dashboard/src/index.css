@@ -103,12 +103,13 @@ body {
 .timebars .gridline {
   position: absolute; left: 0; right: 0; border-top: 1px solid var(--grid);
 }
+/* Labels sit in a gutter the bars never enter, so a tall bar cannot cover one. */
 .timebars .gridlabel {
-  position: absolute; right: 0; transform: translateY(-100%);
-  font-size: 11px; color: var(--muted);
+  position: absolute; right: 0; width: 44px; text-align: right; transform: translateY(-50%);
+  font-size: 11px; line-height: 1; color: var(--muted);
 }
 .timebars .cols {
-  position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 2px;
+  position: absolute; inset: 0 52px 0 0; display: flex; align-items: flex-end; gap: 2px;
 }
 .timebars .col { flex: 1; min-width: 0; position: relative; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; cursor: default; }
 .timebars .col:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
